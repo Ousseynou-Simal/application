@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 
 import duckdb
+
+import duckdb
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -321,11 +323,13 @@ dvf = dvf.loc[dvf["prix_m2"].between(borne_basse, borne_haute)]
 prix_m2_par_commune = dvf.groupby("code_commune")["prix_m2"]
 dvf = dvf.loc[
     dvf["prix_m2"].between(
+    dvf["prix_m2"].between(
         prix_m2_par_commune.transform("quantile", 0.01),
         prix_m2_par_commune.transform("quantile", 0.99),
     )
 ]
 
+dvf["log_surface"] = np.log(dvf["surface_reelle_bati"])
 dvf["log_surface"] = np.log(dvf["surface_reelle_bati"])
 
 # DVF prices include land and outbuildings (extra lots), so we account for them.
@@ -353,6 +357,9 @@ dvf_start_data = dvf.dropna(subset=["prix_m2"])
 prix_m2_commune = (
     dvf.groupby(["code_commune", "nom_commune"])["prix_m2"].mean().sort_values()
 )
+prix_m2_commune = (
+    dvf.groupby(["code_commune", "nom_commune"])["prix_m2"].mean().sort_values()
+)
 
 print("Bottom 5 communes (prix au m2 le plus bas) :")
 print(prix_m2_commune.head(5))
@@ -373,7 +380,22 @@ numeric_transformer = Pipeline(
         ("imputer", SimpleImputer(strategy="median")),
     ]
 )
+numeric_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+    ]
+)
 
+categorical_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        (
+            "ordinal",
+            OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
+        ),
+        ("as_category", FunctionTransformer(as_category)),
+    ]
+)
 categorical_transformer = Pipeline(
     steps=[
         ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -495,3 +517,4 @@ importance = report.inspection.permutation_importance(data_source="test").frame(
 print(importance)
 
 print("Fin du script !")
+

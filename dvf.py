@@ -72,6 +72,7 @@ parser = argparse.ArgumentParser(description="Paramètres du modèle LightGBM")
 parser.add_argument("--n_trees", type=int, default=1500, help="Nombre d'arbres")
 args = parser.parse_args()
 
+# Ce qui permet de ne pas cahnger le nom de cette variable meme si demain l'argument change
 n_trees = args.n_trees
 
 print(f"Valeur de l'argument n_trees: {n_trees}")

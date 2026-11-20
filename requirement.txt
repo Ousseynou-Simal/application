@@ -1,0 +1,14 @@
+duckdb
+geopandas
+matplotlib
+numpy
+pandas
+requests
+seaborn
+lightgbm
+scikit_learn
+skore
+pylint
+ruff
+argparse
+python-dotenv

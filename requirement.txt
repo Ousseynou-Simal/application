@@ -12,3 +12,5 @@ pylint
 ruff
 argparse
 python-dotenv
+pathlib
+geopandas

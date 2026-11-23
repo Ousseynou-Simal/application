@@ -9,7 +9,6 @@ from pathlib import Path
 
 import duckdb
 
-import duckdb
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +25,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder
 from skore import EstimatorReport
+
+from features import build_features
+from import_data import download_sources, get_melodi_indicator
+from check import  check_code_commune_formatting, check_missing_values, check_unseen_categories
+from model import create_pipeline
 
 load_dotenv()
 con = duckdb.connect(database=":memory:")
@@ -72,118 +76,11 @@ parser = argparse.ArgumentParser(description="Paramètres du modèle LightGBM")
 parser.add_argument("--n_trees", type=int, default=1500, help="Nombre d'arbres")
 args = parser.parse_args()
 
-# Ce qui permet de ne pas cahnger le nom de cette variable meme si demain l'argument change
+# Ce qui permet de ne pas changer le nom de cette variable meme si demain l'argument change
 n_trees = args.n_trees
 
 print(f"Valeur de l'argument n_trees: {n_trees}")
 
-
-def download_sources(url_fichier: str, cible: Path) -> None:
-    """Download url_fichier and write it to cible"""
-    r = requests.get(url_fichier, timeout=120)
-    r.raise_for_status()
-    with open(cible, "wb") as f:
-        f.write(r.content)
-
-
-def get_melodi_indicator(
-    code: str,
-    value_name: str,
-    jeton_api: str,
-    dataset: str = "DS_FILOSOFI_CC",
-    dimension: str = "FILOSOFI_MEASURE",
-    time_period: int = 2023,
-    geo_level: tuple[str, ...] = ("COM", "ARM"),
-) -> pd.DataFrame:
-    """Fetch a municipality-level indicator from the Insee Melodi API
-
-    DVF codes Paris by arrondissement (75101 to 75120), not as one municipality
-    (75056): without the ARM level, Paris sales would get no municipality data.
-    """
-
-    url = f"https://api.insee.fr/melodi/data/{dataset}"
-
-    params = {
-        "GEO": list(geo_level),
-        dimension: code,
-        "TIME_PERIOD": time_period,
-        "maxResult": 40000,
-    }
-
-    headers = {"Authorization": f"Bearer {jeton_api}"}
-
-    response = requests.get(url, params=params, headers=headers, timeout=60)
-    response.raise_for_status()
-    observations = response.json()["observations"]
-
-    return pd.DataFrame(
-        {
-            "CODGEO": obs["dimensions"]["GEO"].split("-")[-1],
-            value_name: obs["measures"]["OBS_VALUE_NIVEAU"].get("value"),
-        }
-        for obs in observations
-    )
-
-
-def check_code_commune_formatting(
-    connection: duckdb.DuckDBPyConnection,
-    df: pd.DataFrame,
-):
-    """Check that code_commune has 5 characters and starts with the department"""
-
-    query = (
-        "SELECT COUNT(*) AS n_bad "
-        "FROM df "
-        "WHERE length(code_commune) <> 5 "
-        "OR NOT starts_with(code_commune, code_departement)"
-    )
-
-    bad = connection.sql(query).fetchall()[0][0]
-
-    if bad == 0:
-        print(
-            "Test OK: code_commune always has 5 characters starting with the department"
-        )
-    else:
-        print(f"Issue in code_commune: {bad} malformed codes")
-
-
-def check_missing_values(
-    connection: duckdb.DuckDBPyConnection,
-    df: pd.DataFrame,
-    variable: str = "valeur_fonciere",
-):
-    """Count the missing values of a variable"""
-
-    query = f"SELECT COUNT(*) AS n_missing FROM df WHERE {variable} IS NULL"
-
-    n_missing = connection.sql(query).fetchall()[0][0]
-
-    message_ok = f"No missing values for variable {variable}"
-    message_warn = f"{n_missing} missing values for variable {variable}"
-    message = message_ok if n_missing == 0 else message_warn
-    print(message)
-
-
-def check_unseen_categories(
-    train_dataset: pd.DataFrame,
-    test_dataset: pd.DataFrame,
-    variable: str,
-):
-    """Check that every test category also appears in the training set
-
-    Unseen categories are encoded as unknown (-1): the model has learned nothing
-    about them, so their predictions are unreliable.
-    """
-
-    if set(test_dataset[variable].dropna().unique()) - set(
-        train_dataset[variable].dropna().unique()
-    ):
-        message = f"Categories of {variable} missing from the training set"
-    else:
-        message = f"All test categories of {variable} are known to the model"
-
-    print(message)
 
 
 # DATA IMPORT ---------------------------------------
@@ -201,6 +98,8 @@ for nom_fichier, url_source in SOURCES.items():
         download_sources(url_source, chemin)
         print(f"  -> {chemin.stat().st_size / 1e6:.0f} Mo")
 
+
+# gpd c'est geopandad qui permet de faire de la lecture et la jointure des données spaciales
 dvf = gpd.read_parquet(DATA_LOCATION / "dvf.parquet")
 
 
@@ -302,62 +201,14 @@ grid.set(xscale="log", yscale="log")
 
 print("Feature engineering")
 
-dvf["tx_pauvrete"] = dvf["nbre_menages_pauvres"] / dvf["nbre_menages"]
-dvf["nv_vie_moyen"] = dvf["somme_nv_vie"] / dvf["nbre_menages"]
-# In Filosofi each household occupies one dwelling, so the number of households
-# is the denominator for dwelling counts.
-dvf["part_proprietaires"] = dvf["nbre_menages_prop"] / dvf["nbre_menages"]
-dvf["part_logements_sociaux"] = dvf["nbre_logements_sociaux"] / dvf["nbre_menages"]
-dvf["part_logements_avant_1945"] = (
-    dvf["nbre_logements_avant_1945"] / dvf["nbre_menages"]
-)
-dvf["surface_moyenne_logements"] = dvf["surface_totale_logements"] / dvf["nbre_menages"]
-dvf["prix_m2"] = dvf["valeur_fonciere"] / dvf["surface_reelle_bati"]
-
-# Extreme prices per m² are mostly multi-lot sales, split ownership or data
-# entry errors: keeping them would make the model learn noise.
-borne_basse, borne_haute = dvf["prix_m2"].quantile([0.01, 0.99])
-dvf = dvf.loc[dvf["prix_m2"].between(borne_basse, borne_haute)]
-
-# Global bounds are driven by Paris and let outliers through in the suburbs,
-# hence a second filter within each municipality.
-prix_m2_par_commune = dvf.groupby("code_commune")["prix_m2"]
-dvf = dvf.loc[
-    dvf["prix_m2"].between(
-    dvf["prix_m2"].between(
-        prix_m2_par_commune.transform("quantile", 0.01),
-        prix_m2_par_commune.transform("quantile", 0.99),
-    )
-]
-
-dvf["log_surface"] = np.log(dvf["surface_reelle_bati"])
-dvf["log_surface"] = np.log(dvf["surface_reelle_bati"])
-
-# DVF prices include land and outbuildings (extra lots), so we account for them.
-# ratio_carrez flags sales whose declared area does not match the property.
-dvf["log_surface_terrain"] = np.log1p(dvf["surface_terrain"].fillna(0))
-dvf["ratio_carrez"] = dvf["lot1_surface_carrez"] / dvf["surface_reelle_bati"]
-
-# Distance to the Eiffel Tower proxies centrality, a strong driver of prices.
-# Lambert-93 (EPSG:2154) gives distances in meters.
-tour_eiffel = gpd.GeoSeries.from_xy([2.2945], [48.8584], crs="EPSG:4326").to_crs(
-    "EPSG:2154"
-)
-distance_eiffel_km = (
-    dvf.geometry.to_crs("EPSG:2154").distance(tour_eiffel.iloc[0]) / 1000
-)
-dvf["log_distance_eiffel"] = np.log1p(distance_eiffel_km)
+dvf = build_features(dvf)
 
 # Missing features are imputed in the pipeline: only rows without a target
 # are dropped.
 dvf_start_data = dvf.dropna(subset=["prix_m2"])
 
-
 # PRICE PER M² BY MUNICIPALITY ---------------------------------------
 
-prix_m2_commune = (
-    dvf.groupby(["code_commune", "nom_commune"])["prix_m2"].mean().sort_values()
-)
 prix_m2_commune = (
     dvf.groupby(["code_commune", "nom_commune"])["prix_m2"].mean().sort_values()
 )
@@ -367,79 +218,15 @@ print(prix_m2_commune.head(5))
 print("Top 5 communes (prix au m2 le plus élevé) :")
 print(prix_m2_commune.tail(5))
 
-
 # MODEL ---------------------------------------
 
-
-def as_category(df):
-    """LightGBM only handles 'category' columns natively as categorical."""
-    return df.astype("category")
-
-
-numeric_transformer = Pipeline(
-    steps=[
-        ("imputer", SimpleImputer(strategy="median")),
-    ]
+pipe = create_pipeline(
+    numeric_features=NUMERIC_FEATURES,
+    categorical_features=CATEGORICAL_FEATURES,
+    n_trees = n_trees,
+    learning_rate = LEARNING_RATE,
+    num_leaves = NUM_LEAVES,
 )
-numeric_transformer = Pipeline(
-    steps=[
-        ("imputer", SimpleImputer(strategy="median")),
-    ]
-)
-
-categorical_transformer = Pipeline(
-    steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        (
-            "ordinal",
-            OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
-        ),
-        ("as_category", FunctionTransformer(as_category)),
-    ]
-)
-categorical_transformer = Pipeline(
-    steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        (
-            "ordinal",
-            OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
-        ),
-        ("as_category", FunctionTransformer(as_category)),
-    ]
-)
-
-preprocessor = ColumnTransformer(
-    transformers=[
-        ("Preprocessing numerical", numeric_transformer, NUMERIC_FEATURES),
-        ("Preprocessing categorical", categorical_transformer, CATEGORICAL_FEATURES),
-    ]
-).set_output(transform="pandas")
-
-pipe_lgbm = Pipeline(
-    [
-        ("preprocessor", preprocessor),
-        (
-            "regressor",
-            LGBMRegressor(
-                n_estimators=n_trees,
-                learning_rate=LEARNING_RATE,
-                num_leaves=NUM_LEAVES,
-                min_child_samples=10,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=0,
-                verbose=-1,
-            ),
-        ),
-    ]
-)
-
-# Price per m² is highly skewed: learning on its log keeps the loss from being
-# dominated by the most expensive sales.
-pipe = TransformedTargetRegressor(
-    regressor=pipe_lgbm, func=np.log1p, inverse_func=np.expm1
-)
-
 
 # TRAIN/TEST SPLIT ---------------------------------------
 

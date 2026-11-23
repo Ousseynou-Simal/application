@@ -14,3 +14,4 @@ argparse
 python-dotenv
 pathlib
 geopandas
+logging

@@ -21,3 +21,10 @@ JETON_API="####" #renseigner la valeur pertinente
 * Données DVF récupérées et simplifiées de https://www.data.gouv.fr/datasets/demandes-de-valeurs-foncieres
 * Données carroyées Filosofi: https://www.data.gouv.fr/datasets/revenus-pauvrete-et-niveau-de-vie-donnees-carroyees-2019-et-2021-dispositif-fichier-localise-social-et-fiscal-filosofi
 * Données agrégées Filosofi récupérées depuis l'API Melodi de l'Insee
+
+
+Installer toutes les dépendances au bon fonctionnement du code en lançant cette commande dans le terminale
+
+```python
+pip install -r requirement.text
+```

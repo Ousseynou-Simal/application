@@ -4,6 +4,7 @@ from DVF transactions enriched with Filosofi socio-economic data
 """
 
 import argparse
+import logging
 import os
 from pathlib import Path
 
@@ -22,12 +23,27 @@ from src.data.check import (
 )
 from src.models.evaluation import evaluate_with_skore, rmse_by_commune
 from src.data.features import build_features
-from import_data import (
+from src.data.import_data import (
     add_filosofi_carreaux,
     add_filosofi_communes,
     download_missing_sources,
 )
 from src.models.model import create_pipeline
+
+# Configuration du logger
+logging.basicConfig(
+    format="{asctime} - {levelname} - {message}",
+    style="{",
+    datefmt="%Y-%m-%d %H:%M",
+    level=logging.INFO, # le niveau de log le plus bas
+    handlers=[logging.FileHandler("recording.log"), logging.StreamHandler()],
+)
+
+# DEBUG only for our own messages: globally, libraries such as matplotlib
+# would flood the log
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) # On met a jour le niveau du log
+
 
 load_dotenv()
 con = duckdb.connect(database=":memory:")
@@ -57,6 +73,8 @@ DEPARTEMENTS_PARIS = ["75", "92", "93", "94"]
 jeton_api = os.environ["JETON_API"]
 
 DATA_LOCATION = Path("data/raw")
+DERIVED_DATA_LOCATION = Path("data/derived")
+
 SOURCES = {
     "dvf.parquet": (
         "https://minio.lab.sspcloud.fr/"
@@ -76,18 +94,22 @@ args = parser.parse_args()
 
 n_trees = args.n_trees
 
-print(f"Valeur de l'argument n_trees: {n_trees}")
+# print(f"Valeur de l'argument n_trees: {n_trees}")
+logger.debug(f"Valeur de l'argument n_trees: {n_trees}")
 
 
 # DATA IMPORT ---------------------------------------
 
-print("Lecture des données ------------------------")
+logger.debug(f"\n{80 * '-'}\nLecture des données\n{80 * '-'}")
 
 download_missing_sources(SOURCES, DATA_LOCATION)
+
 dvf = gpd.read_parquet(DATA_LOCATION / "dvf.parquet")
 
 
 # QUALITY DIAGNOSTICS ---------------------------------------
+
+logger.debug(f"\n{80 * '-'}\nValidation des données\n{80 * '-'}")
 
 # DuckDB cannot read the geometry column as Pandas formatted it
 dvf_attributs = dvf.drop(columns="geometry")
@@ -105,7 +127,7 @@ for var in column_names:
 
 # SCOPE RESTRICTION ---------------------------------------
 
-print("Restriction aux départements de la petite couronne")
+logger.info("Restriction aux départements de la petite couronne")
 
 dvf = dvf.loc[dvf["code_departement"].isin(DEPARTEMENTS_PARIS)]
 dvf = dvf.loc[dvf["valeur_fonciere"] < 1e6]
@@ -116,12 +138,12 @@ dvf = dvf.loc[dvf["valeur_fonciere"] < 1e6]
 dvf = add_filosofi_carreaux(dvf, DATA_LOCATION / "filosofi_carreaux_200m_2021.parquet")
 dvf = add_filosofi_communes(dvf, jeton_api)
 
-print(dvf.head(5))
+logger.debug(f"Aperçu des données enrichies:\n{dvf.head(5)}")
 
 
 # DESCRIPTIVE STATISTICS ---------------------------------------
 
-print("Statistiques descriptives ---------------------")
+logger.debug(f"\n{80 * '-'}\nStatistiques descriptives\n{80 * '-'}")
 
 sns.histplot(data=dvf, x="valeur_fonciere")
 sns.histplot(data=dvf, x="valeur_fonciere", log_scale=True)
@@ -132,7 +154,7 @@ grid.set(xscale="log", yscale="log")
 
 # FEATURE ENGINEERING ---------------------------------------
 
-print("Feature engineering")
+logger.debug(f"\n{80 * '-'}\nFeature engineering\n{80 * '-'}")
 
 dvf = build_features(dvf)
 
@@ -147,10 +169,8 @@ prix_m2_commune = (
     dvf.groupby(["code_commune", "nom_commune"])["prix_m2"].mean().sort_values()
 )
 
-print("Bottom 5 communes (prix au m2 le plus bas) :")
-print(prix_m2_commune.head(5))
-print("Top 5 communes (prix au m2 le plus élevé) :")
-print(prix_m2_commune.tail(5))
+logger.info(f"Communes au prix au m2 le plus bas :\n{prix_m2_commune.head(5)}")
+logger.info(f"Communes au prix au m2 le plus élevé :\n{prix_m2_commune.tail(5)}")
 
 
 # TRAIN/TEST SPLIT ---------------------------------------
@@ -161,8 +181,9 @@ y = dvf_start_data["prix_m2"]
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=0)
 
-pd.concat([X_train, y_train], axis=1).to_csv("data/derived/train.csv")
-pd.concat([X_test, y_test], axis=1).to_csv("data/derived/test.csv")
+DERIVED_DATA_LOCATION.mkdir(parents=True, exist_ok=True)
+pd.concat([X_train, y_train], axis=1).to_csv(DERIVED_DATA_LOCATION / "train.csv")
+pd.concat([X_test, y_test], axis=1).to_csv(DERIVED_DATA_LOCATION / "test.csv")
 
 
 # SPLIT VALIDATION ---------------------------------------
@@ -172,6 +193,8 @@ for string_var in CATEGORICAL_FEATURES:
 
 
 # TRAINING AND EVALUATION ---------------------------------------
+
+logger.debug(f"\n{80 * '-'}\nEntraînement du modèle\n{80 * '-'}")
 
 pipe = create_pipeline(
     NUMERIC_FEATURES,
@@ -184,22 +207,20 @@ pipe.fit(X_train, y_train)
 
 rmse_train = root_mean_squared_error(y_train, pipe.predict(X_train))
 rmse_test = root_mean_squared_error(y_test, pipe.predict(X_test))
-print(f"RMSE sur l'apprentissage : {rmse_train:,.0f} €/m²")
-print(f"RMSE sur le test : {rmse_test:,.0f} €/m²")
+logger.info(f"RMSE sur l'apprentissage : {rmse_train:,.0f} €/m²")
+logger.info(f"RMSE sur le test : {rmse_test:,.0f} €/m²")
 
 cog = dvf_start_data[["code_commune", "nom_commune"]].drop_duplicates()
 rmse_commune = rmse_by_commune(pipe, X_test, y_test, cog)
 
-print("Bottom 5 communes (RMSE la plus faible) :")
-print(rmse_commune.head(5))
-print("Top 5 communes (RMSE la plus élevée) :")
-print(rmse_commune.tail(5))
+logger.info(f"Communes avec la RMSE la plus faible :\n{rmse_commune.head(5)}")
+logger.info(f"Communes avec la RMSE la plus élevée :\n{rmse_commune.tail(5)}")
 
 
 # EVALUATION WITH SKORE ---------------------------------------
 
-print("Évaluation skore ---------------------")
+logger.debug(f"\n{80 * '-'}\nÉvaluation du modèle avec skore\n{80 * '-'}")
 
 evaluate_with_skore(pipe, X_train, y_train, X_test, y_test)
 
-print("Fin du script !")
+logger.debug(f"\n{80 * '-'}\nFIN DU SCRIPT !\n{80 * '-'}")

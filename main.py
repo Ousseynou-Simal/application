@@ -15,19 +15,19 @@ from dotenv import load_dotenv
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split
 
-from check import (
+from src.data.check import (
     check_code_commune_formatting,
     check_missing_values,
     check_unseen_categories,
 )
-from evaluation import evaluate_with_skore, rmse_by_commune
-from features import build_features
+from src.models.evaluation import evaluate_with_skore, rmse_by_commune
+from src.data.features import build_features
 from import_data import (
     add_filosofi_carreaux,
     add_filosofi_communes,
     download_missing_sources,
 )
-from model import create_pipeline
+from src.models.model import create_pipeline
 
 load_dotenv()
 con = duckdb.connect(database=":memory:")
@@ -56,7 +56,7 @@ DEPARTEMENTS_PARIS = ["75", "92", "93", "94"]
 
 jeton_api = os.environ["JETON_API"]
 
-DATA_LOCATION = Path("data")
+DATA_LOCATION = Path("data/raw")
 SOURCES = {
     "dvf.parquet": (
         "https://minio.lab.sspcloud.fr/"
@@ -161,8 +161,8 @@ y = dvf_start_data["prix_m2"]
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=0)
 
-pd.concat([X_train, y_train], axis=1).to_csv("train.csv")
-pd.concat([X_test, y_test], axis=1).to_csv("test.csv")
+pd.concat([X_train, y_train], axis=1).to_csv("data/derived/train.csv")
+pd.concat([X_test, y_test], axis=1).to_csv("data/derived/test.csv")
 
 
 # SPLIT VALIDATION ---------------------------------------
